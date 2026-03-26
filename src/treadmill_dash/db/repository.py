@@ -117,14 +117,15 @@ class Repository:
 
         Returns the session ID to resume, or None if this is a new session.
 
-        Heuristic: if the most recent DB session's distance and elapsed time
-        are both ≤ the treadmill's current values, it's the same treadmill
-        session (the treadmill counters only go up within a session).
-        A lower distance or elapsed time means the treadmill was reset.
+        The treadmill's cumulative counters (distance, elapsed) only go up
+        within a single treadmill session.  If the current treadmill values
+        are ≥ the most recent DB session's values, it's the same treadmill
+        session — even if the app was quit and restarted in between.
+        If either counter is lower, the treadmill was reset → new session.
         """
         assert self._db
         async with self._db.execute(
-            """SELECT id, total_distance_m, elapsed_s, max_speed_kmh
+            """SELECT id, total_distance_m, elapsed_s
             FROM sessions
             ORDER BY COALESCE(end_time, start_time) DESC LIMIT 1"""
         ) as cur:
@@ -136,11 +137,11 @@ class Repository:
         prev_dist = row["total_distance_m"]
         prev_elapsed = row["elapsed_s"]
 
-        # Treadmill counters reset → definitely a new session
+        # Treadmill counters lower than stored → new treadmill session
         if treadmill_distance_m < prev_dist or treadmill_elapsed_s < prev_elapsed:
             return None
 
-        # Treadmill counters are same or higher → same treadmill session
+        # Same or higher → same treadmill session, resume this DB row
         return row["id"]
 
     async def start_session(self) -> int:

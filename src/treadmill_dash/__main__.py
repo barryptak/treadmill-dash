@@ -13,7 +13,7 @@ from typing import Optional
 from treadmill_dash.ble.connection import TreadmillConnection
 from treadmill_dash.config import Config
 from treadmill_dash.db.repository import Repository, DEFAULT_DB_PATH
-from treadmill_dash.models import TreadmillData
+from treadmill_dash.models import TreadmillData, SessionStats
 from treadmill_dash.ui.dashboard import TreadmillDashboard
 
 # Sample recording: save one sample every N BLE notifications to avoid
@@ -128,9 +128,103 @@ def main() -> None:
                 f"New treadmill session #{db_session_id}"
             )
 
+    def _finalize_and_start_new_session() -> None:
+        """Save the current session to DB and start a new one.
+
+        Uses the BLE-thread-local tracked values (_prev_*) which are the
+        last values seen before the reset, avoiding cross-thread staleness.
+        """
+        nonlocal db_session_id, sample_counter, _prev_distance_m, _prev_elapsed_s
+        if repo is None or db_session_id is None:
+            return
+        if _prev_distance_m is None and _prev_elapsed_s is None:
+            return
+
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                repo.end_session(
+                    session_id=db_session_id,
+                    total_distance_m=_prev_distance_m or 0.0,
+                    avg_speed_kmh=app.session.avg_speed_kmh,
+                    max_speed_kmh=app.session.max_speed_kmh,
+                    calories=app.session.total_energy_kcal,
+                    elapsed_s=_prev_elapsed_s or 0,
+                    sample_count=app.session.sample_count,
+                ),
+                _db_loop,
+            )
+            future.result(timeout=5)
+
+            # Start a new DB session
+            new_future = asyncio.run_coroutine_threadsafe(
+                repo.start_session(),
+                _db_loop,
+            )
+            db_session_id = new_future.result(timeout=5)
+            app.db_session_id = db_session_id
+            sample_counter = 0
+            _prev_distance_m = None
+            _prev_elapsed_s = None
+
+            logging.getLogger(__name__).info(
+                f"Treadmill reset detected — saved session, starting #{db_session_id}"
+            )
+            app._db_stats_dirty = True
+        except Exception as e:
+            logging.getLogger(__name__).error(f"Session finalize error: {e}")
+
+    # Track last-seen treadmill values in the BLE thread for reset detection.
+    # Can't rely on app.session since it's updated async in the Textual thread.
+    _prev_distance_m: Optional[float] = None
+    _prev_elapsed_s: Optional[int] = None
+
+    def _detect_treadmill_reset(data: TreadmillData) -> bool:
+        """Check if the treadmill has reset (new session started)."""
+        nonlocal _prev_distance_m, _prev_elapsed_s
+        if _prev_distance_m is None and _prev_elapsed_s is None:
+            return False
+        log = logging.getLogger(__name__)
+        # Elapsed time dropping to zero is a definitive reset
+        if (data.elapsed_time_s is not None
+                and _prev_elapsed_s is not None
+                and data.elapsed_time_s == 0
+                and _prev_elapsed_s > 0):
+            log.info(f"Reset: elapsed dropped to 0 (was {_prev_elapsed_s}s)")
+            return True
+        # Distance or elapsed going down means the treadmill started fresh
+        if (data.total_distance_m is not None
+                and _prev_distance_m is not None
+                and data.total_distance_m < _prev_distance_m - 1):
+            log.info(f"Reset: distance dropped {_prev_distance_m} -> {data.total_distance_m}")
+            return True
+        if (data.elapsed_time_s is not None
+                and _prev_elapsed_s is not None
+                and data.elapsed_time_s < _prev_elapsed_s - 1):
+            log.info(f"Reset: elapsed dropped {_prev_elapsed_s} -> {data.elapsed_time_s}")
+            return True
+        return False
+
+    def _track_treadmill_values(data: TreadmillData) -> None:
+        """Update BLE-thread-local tracking of treadmill values."""
+        nonlocal _prev_distance_m, _prev_elapsed_s
+        if data.total_distance_m is not None:
+            _prev_distance_m = data.total_distance_m
+        if data.elapsed_time_s is not None:
+            _prev_elapsed_s = data.elapsed_time_s
+
     def on_data(data: TreadmillData) -> None:
         """BLE callback — runs in the BLE thread."""
         nonlocal sample_counter
+
+        # Detect treadmill reset (new walk started) while app is still running.
+        # Must finalize BEFORE tracking new values or updating the session.
+        if session_resolved and _detect_treadmill_reset(data):
+            _finalize_and_start_new_session()
+            app.session = SessionStats()
+
+        # Track values in the BLE thread for reset detection
+        _track_treadmill_values(data)
+
         try:
             app.call_from_thread(app.update_data, data)
         except RuntimeError:

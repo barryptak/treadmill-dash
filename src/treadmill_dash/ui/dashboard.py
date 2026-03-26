@@ -186,9 +186,11 @@ class StatsScreen(Screen):
         self._rebuild_table()
 
     def _rebuild_table(self) -> None:
-        """Re-render the recent sessions table with current units."""
-        if not hasattr(self, "_db_recent"):
-            return
+        """Re-render the recent sessions table with current units.
+
+        The live/active session is shown as the first row (if moving) and
+        is updated every second by _refresh_live.
+        """
         app = self._get_app()
         use_miles = app.config.use_miles
         du = app.config.distance_unit
@@ -196,28 +198,82 @@ class StatsScreen(Screen):
         table = self.query_one("#recent-table", DataTable)
         table.clear(columns=True)
         table.add_columns("📅 Started", "⏱️ Duration", f"📏 Dist ({du})", f"⚡ Avg ({su})", f"🚀 Max ({su})", "🔥 Cals")
-        for s in self._db_recent:
-            dist = s.total_distance_m / (1609.344 if use_miles else 1000)
-            avg = s.avg_speed_kmh * (0.621371 if use_miles else 1)
-            mx = s.max_speed_kmh * (0.621371 if use_miles else 1)
+
+        # Live session row (always first)
+        session = app.session
+        if session.sample_count > 0:
+            dist = session.total_distance_m / (1609.344 if use_miles else 1000)
+            avg = session.avg_speed_kmh * (0.621371 if use_miles else 1)
+            mx = session.max_speed_kmh * (0.621371 if use_miles else 1)
             table.add_row(
-                s.date_str,
-                s.elapsed_fmt,
-                f"{dist:.2f}",
-                f"{avg:.1f}",
-                f"{mx:.1f}",
-                str(s.calories),
+                "[bold green]▶ LIVE[/]",
+                f"[bold green]{session.elapsed_time_fmt}[/]",
+                f"[bold green]{dist:.2f}[/]",
+                f"[bold green]{avg:.1f}[/]",
+                f"[bold green]{mx:.1f}[/]",
+                f"[bold green]{session.total_energy_kcal}[/]",
+                key="live",
             )
+
+        # Past sessions from DB (excluding the active one)
+        if hasattr(self, "_db_recent"):
+            for s in self._db_recent:
+                if app.db_session_id is not None and s.id == app.db_session_id:
+                    continue  # skip — it's shown as the live row
+                dist = s.total_distance_m / (1609.344 if use_miles else 1000)
+                avg = s.avg_speed_kmh * (0.621371 if use_miles else 1)
+                mx = s.max_speed_kmh * (0.621371 if use_miles else 1)
+                table.add_row(
+                    s.date_str,
+                    s.elapsed_fmt,
+                    f"{dist:.2f}",
+                    f"{avg:.1f}",
+                    f"{mx:.1f}",
+                    str(s.calories),
+                )
+
+    def _update_live_row(self) -> None:
+        """Update just the live session row in the table."""
+        app = self._get_app()
+        session = app.session
+        table = self.query_one("#recent-table", DataTable)
+        use_miles = app.config.use_miles
+
+        if session.sample_count == 0:
+            return
+
+        dist = session.total_distance_m / (1609.344 if use_miles else 1000)
+        avg = session.avg_speed_kmh * (0.621371 if use_miles else 1)
+        mx = session.max_speed_kmh * (0.621371 if use_miles else 1)
+
+        try:
+            row_key = table.get_row("live")  # noqa — just checking existence
+            # Update each cell in the live row
+            cols = list(table.columns.keys())
+            table.update_cell("live", cols[1], f"[bold green]{session.elapsed_time_fmt}[/]")
+            table.update_cell("live", cols[2], f"[bold green]{dist:.2f}[/]")
+            table.update_cell("live", cols[3], f"[bold green]{avg:.1f}[/]")
+            table.update_cell("live", cols[4], f"[bold green]{mx:.1f}[/]")
+            table.update_cell("live", cols[5], f"[bold green]{session.total_energy_kcal}[/]")
+        except Exception:
+            # Row doesn't exist yet — rebuild will add it
+            self._rebuild_table()
 
     def _refresh_live(self) -> None:
         """Update current-session stats live."""
         app = self._get_app()
+
+        # Reload DB stats if a session was finalized while we're viewing
+        if app._db_stats_dirty:
+            app._db_stats_dirty = False
+            self.run_worker(self._load_db_stats())
+
         data = app._latest_data
         session = app.session
         use_miles = app.config.use_miles
         km_to_unit = 0.621371 if use_miles else 1.0
 
-        # Current session
+        # Current session widgets
         speed = data.speed_mph if use_miles else data.instantaneous_speed_kmh
         self.query_one("#cs-speed", BigStat).value = f"{speed:.1f}"
 
@@ -229,6 +285,9 @@ class StatsScreen(Screen):
 
         if data.total_energy_kcal is not None:
             self.query_one("#cs-calories", BigStat).value = str(data.total_energy_kcal)
+
+        # Update live row in the table
+        self._update_live_row()
 
         # Merge current session into lifetime + today stats
         if hasattr(self, "_db_lifetime"):
@@ -359,6 +418,7 @@ class TreadmillDashboard(App):
         self._connection_status = "Disconnected"
         self.repo = repo  # Optional[Repository]
         self.db_session_id: Optional[int] = None
+        self._db_stats_dirty = False  # set True when a session is finalized mid-app
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
