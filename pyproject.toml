@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "treadmill-dash"
+version = "0.1.0"
+description = "Live treadmill dashboard via Bluetooth FTMS"
+requires-python = ">=3.11"
+dependencies = [
+    "bleak>=0.21.0",
+    "textual>=0.40.0",
+    "rich>=13.0.0",
+    "aiosqlite>=0.19.0",
+]
+
+[project.scripts]
+treadmill-dash = "treadmill_dash.__main__:main"
+treadmill-scan = "treadmill_dash.ble.scanner:main"
