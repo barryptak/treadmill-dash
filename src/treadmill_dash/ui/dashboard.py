@@ -11,8 +11,16 @@ from textual.reactive import reactive
 from textual.screen import Screen
 from textual.widgets import Footer, Header, Static, DataTable
 
-from treadmill_dash.models import TreadmillData, SessionStats
+from treadmill_dash.models import TreadmillData, SessionStats, MeetingStats
 from treadmill_dash.config import Config
+from treadmill_dash.clipboard import copy_html_to_clipboard
+from treadmill_dash.html_stats import (
+    current_session_html,
+    today_stats_html,
+    lifetime_stats_html,
+    meeting_stats_html,
+)
+from treadmill_dash.teams.meeting_detector import get_active_meeting
 
 
 class BigStat(Static):
@@ -402,12 +410,22 @@ class TreadmillDashboard(App):
         width: 1fr;
         padding: 0 2;
     }
+
+    #meeting-bar {
+        height: 1;
+        padding: 0 1;
+        background: $surface;
+    }
     """
 
     BINDINGS = [
         ("q", "quit", "Quit"),
         ("u", "toggle_units", "Toggle km/mph"),
         ("s", "show_stats", "Stats"),
+        ("c", "copy_current", "📋 Session"),
+        ("t", "copy_today", "📋 Today"),
+        ("l", "copy_lifetime", "📋 Lifetime"),
+        ("m", "copy_meeting", "📋 Meeting"),
     ]
 
     def __init__(self, config: Config | None = None, repo=None, **kwargs) -> None:
@@ -419,6 +437,7 @@ class TreadmillDashboard(App):
         self.repo = repo  # Optional[Repository]
         self.db_session_id: Optional[int] = None
         self._db_stats_dirty = False  # set True when a session is finalized mid-app
+        self._meeting: Optional[MeetingStats] = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -432,12 +451,14 @@ class TreadmillDashboard(App):
         with Horizontal(id="session-row"):
             yield BigStat(label="⚡ AVG SPEED", unit=self.config.speed_unit, id="avg-speed")
             yield BigStat(label="🚀 MAX SPEED", unit=self.config.speed_unit, id="max-speed")
+        yield Static("", id="meeting-bar")
         yield Footer()
 
     def on_mount(self) -> None:
         self.title = "🏃 Treadmill Dashboard"
         self.sub_title = "Waiting for data..."
         self.set_interval(0.5, self._refresh_display)
+        self.set_interval(5.0, self._poll_meeting)
 
     def update_data(self, data: TreadmillData) -> None:
         """Called from the BLE callback with new treadmill data."""
@@ -497,6 +518,59 @@ class TreadmillDashboard(App):
         if self.session.sample_count > 0:
             self.sub_title = "Receiving data"
 
+        # Update meeting bar
+        self._update_meeting_bar()
+
+    def _poll_meeting(self) -> None:
+        """Check for active Teams meeting every ~5 seconds."""
+        status = get_active_meeting()
+
+        if status.in_meeting and status.meeting_name:
+            if self._meeting is None or self._meeting.meeting_name != status.meeting_name:
+                # New meeting started (or switched meetings)
+                session = self.session
+                self._meeting = MeetingStats(
+                    meeting_name=status.meeting_name,
+                    start_distance_m=session.total_distance_m,
+                    start_elapsed_s=session.last_elapsed_s or int(session.duration_s),
+                    start_calories=session.total_energy_kcal,
+                )
+                self.notify(
+                    f"Tracking stats for: {status.meeting_name}",
+                    title="📞 Meeting detected",
+                )
+            else:
+                # Same meeting — update stats
+                self._meeting.update(self.session)
+        else:
+            if self._meeting is not None:
+                self._meeting.update(self.session)
+                self.notify(
+                    f"{self._meeting.meeting_name} — "
+                    f"{self._meeting.elapsed_fmt}, "
+                    f"{self._meeting.distance_m / 1000:.2f} km",
+                    title="📞 Meeting ended",
+                )
+                self._meeting = None
+
+    def _update_meeting_bar(self) -> None:
+        """Refresh the meeting indicator bar."""
+        bar = self.query_one("#meeting-bar", Static)
+        if self._meeting is None:
+            bar.update("")
+            return
+
+        self._meeting.update(self.session)
+        use_miles = self.config.use_miles
+        dist = self._meeting.distance_m / (1609.344 if use_miles else 1000)
+        du = self.config.distance_unit
+        bar.update(
+            f"[bold magenta]📞 {self._meeting.meeting_name}[/]  "
+            f"⏱️ {self._meeting.elapsed_fmt}  "
+            f"📏 {dist:.2f} {du}  "
+            f"🔥 {self._meeting.calories} kcal"
+        )
+
     def action_toggle_units(self) -> None:
         self.config.use_miles = not self.config.use_miles
         self.query_one("#distance", BigStat).unit = self.config.distance_unit
@@ -506,6 +580,58 @@ class TreadmillDashboard(App):
     def action_show_stats(self) -> None:
         """Open the stats screen."""
         self.push_screen(StatsScreen())
+
+    def action_copy_current(self) -> None:
+        """Copy current session stats as HTML to clipboard."""
+        html, text = current_session_html(self.session, self.config)
+        try:
+            copy_html_to_clipboard(html, text)
+            self.notify("Current session copied!", title="📋")
+        except Exception as e:
+            self.notify(f"Clipboard error: {e}", severity="error")
+
+    async def action_copy_today(self) -> None:
+        """Copy today's stats (DB + live) as HTML to clipboard."""
+        if self.repo is None:
+            self.notify("No database configured", severity="warning")
+            return
+        today = await self.repo.get_today_stats(
+            exclude_session_id=self.db_session_id
+        )
+        html, text = today_stats_html(today, self.session, self.config)
+        try:
+            copy_html_to_clipboard(html, text)
+            self.notify("Today's stats copied!", title="📋")
+        except Exception as e:
+            self.notify(f"Clipboard error: {e}", severity="error")
+
+    async def action_copy_lifetime(self) -> None:
+        """Copy lifetime stats (DB + live) as HTML to clipboard."""
+        if self.repo is None:
+            self.notify("No database configured", severity="warning")
+            return
+        lifetime = await self.repo.get_lifetime_stats(
+            exclude_session_id=self.db_session_id
+        )
+        html, text = lifetime_stats_html(lifetime, self.session, self.config)
+        try:
+            copy_html_to_clipboard(html, text)
+            self.notify("Lifetime stats copied!", title="📋")
+        except Exception as e:
+            self.notify(f"Clipboard error: {e}", severity="error")
+
+    def action_copy_meeting(self) -> None:
+        """Copy current meeting stats as HTML to clipboard."""
+        if self._meeting is None:
+            self.notify("Not in a meeting", severity="warning")
+            return
+        self._meeting.update(self.session)
+        html, text = meeting_stats_html(self._meeting, self.config)
+        try:
+            copy_html_to_clipboard(html, text)
+            self.notify(f"Meeting stats copied!", title="📋")
+        except Exception as e:
+            self.notify(f"Clipboard error: {e}", severity="error")
 
     def on_unmount(self) -> None:
         """Print session summary to terminal after the app exits."""

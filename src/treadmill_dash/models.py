@@ -54,6 +54,36 @@ class TreadmillData:
 
 
 @dataclass
+class MeetingStats:
+    """Transient stats tracked while in a Teams meeting."""
+
+    meeting_name: str = ""
+    start_time: datetime = field(default_factory=datetime.now)
+    start_distance_m: float = 0.0
+    start_elapsed_s: int = 0
+    start_calories: int = 0
+
+    # Snapshot of treadmill values when meeting started — deltas give
+    # per-meeting stats.
+    distance_m: float = 0.0
+    elapsed_s: int = 0
+    calories: int = 0
+
+    def update(self, session: "SessionStats") -> None:
+        """Recompute meeting-relative stats from current session values."""
+        self.distance_m = max(0, session.total_distance_m - self.start_distance_m)
+        cur_elapsed = session.last_elapsed_s or int(session.duration_s)
+        self.elapsed_s = max(0, cur_elapsed - self.start_elapsed_s)
+        self.calories = max(0, session.total_energy_kcal - self.start_calories)
+
+    @property
+    def elapsed_fmt(self) -> str:
+        m, s = divmod(self.elapsed_s, 60)
+        h, m = divmod(m, 60)
+        return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+@dataclass
 class SessionStats:
     """Aggregated stats for the current treadmill session.
 
@@ -65,7 +95,8 @@ class SessionStats:
     start_time: datetime = field(default_factory=datetime.now)
     sample_count: int = 0
     max_speed_kmh: float = 0.0
-    speed_sum: float = 0.0  # for computing average
+    speed_sum: float = 0.0  # for computing average (only while moving)
+    moving_sample_count: int = 0  # samples where speed > 0
 
     # Raw treadmill values — always latest reported
     total_distance_m: float = 0.0
@@ -75,8 +106,11 @@ class SessionStats:
     def update(self, data: TreadmillData) -> None:
         """Incorporate a new data sample."""
         self.sample_count += 1
-        self.max_speed_kmh = max(self.max_speed_kmh, data.instantaneous_speed_kmh)
-        self.speed_sum += data.instantaneous_speed_kmh
+
+        if data.instantaneous_speed_kmh > 0:
+            self.max_speed_kmh = max(self.max_speed_kmh, data.instantaneous_speed_kmh)
+            self.speed_sum += data.instantaneous_speed_kmh
+            self.moving_sample_count += 1
 
         if data.total_distance_m is not None:
             self.total_distance_m = data.total_distance_m
@@ -87,9 +121,9 @@ class SessionStats:
 
     @property
     def avg_speed_kmh(self) -> float:
-        if self.sample_count == 0:
+        if self.moving_sample_count == 0:
             return 0.0
-        return self.speed_sum / self.sample_count
+        return self.speed_sum / self.moving_sample_count
 
     @property
     def duration_s(self) -> float:
