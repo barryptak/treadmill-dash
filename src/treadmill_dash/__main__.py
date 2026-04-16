@@ -140,15 +140,25 @@ def main() -> None:
         if _prev_distance_m is None and _prev_elapsed_s is None:
             return
 
+        dist = _prev_distance_m or 0.0
+        elapsed = _prev_elapsed_s or 0
+
+        # Don't save an empty session (no meaningful data)
+        if dist == 0 and elapsed == 0:
+            logging.getLogger(__name__).info("Skipping empty session save")
+            _prev_distance_m = None
+            _prev_elapsed_s = None
+            return
+
         try:
             future = asyncio.run_coroutine_threadsafe(
                 repo.end_session(
                     session_id=db_session_id,
-                    total_distance_m=_prev_distance_m or 0.0,
+                    total_distance_m=dist,
                     avg_speed_kmh=app.session.avg_speed_kmh,
                     max_speed_kmh=app.session.max_speed_kmh,
                     calories=app.session.total_energy_kcal,
-                    elapsed_s=_prev_elapsed_s or 0,
+                    elapsed_s=elapsed,
                     sample_count=app.session.sample_count,
                 ),
                 _db_loop,

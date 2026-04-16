@@ -122,10 +122,14 @@ class Repository:
         are ≥ the most recent DB session's values, it's the same treadmill
         session — even if the app was quit and restarted in between.
         If either counter is lower, the treadmill was reset → new session.
+
+        Also checks wall-clock time: if the most recent session ended more
+        than 2 hours ago, it's definitely a different treadmill session
+        (no treadmill runs that long unattended).
         """
         assert self._db
         async with self._db.execute(
-            """SELECT id, total_distance_m, elapsed_s
+            """SELECT id, total_distance_m, elapsed_s, end_time, start_time
             FROM sessions
             ORDER BY COALESCE(end_time, start_time) DESC LIMIT 1"""
         ) as cur:
@@ -137,11 +141,24 @@ class Repository:
         prev_dist = row["total_distance_m"]
         prev_elapsed = row["elapsed_s"]
 
+        # Don't resume an empty session (garbage from a previous reset)
+        if prev_dist == 0 and prev_elapsed == 0 and treadmill_distance_m == 0 and treadmill_elapsed_s == 0:
+            return None
+
         # Treadmill counters lower than stored → new treadmill session
         if treadmill_distance_m < prev_dist or treadmill_elapsed_s < prev_elapsed:
             return None
 
-        # Same or higher → same treadmill session, resume this DB row
+        # Wall-clock check: if the session ended long ago, it can't be
+        # the same treadmill session even if counters happen to be higher
+        last_time_str = row["end_time"] or row["start_time"]
+        if last_time_str:
+            last_time = datetime.fromisoformat(last_time_str)
+            gap = (datetime.now() - last_time).total_seconds()
+            if gap > 7200:  # 2 hours
+                return None
+
+        # Same or higher and recent → same treadmill session, resume
         return row["id"]
 
     async def start_session(self) -> int:
