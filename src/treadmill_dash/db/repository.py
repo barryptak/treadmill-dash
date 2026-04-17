@@ -11,7 +11,7 @@ from typing import Optional
 import aiosqlite
 
 from treadmill_dash.db.schema import init_db
-from treadmill_dash.models import TreadmillData
+from treadmill_dash.models import TreadmillData, MeetingStats
 
 # Default DB location: ~/.treadmill-dash/data.db
 DEFAULT_DB_PATH = Path.home() / ".treadmill-dash" / "data.db"
@@ -332,6 +332,35 @@ class Repository:
             elapsed_s=r["elapsed"],
             calories=r["cals"],
         )
+
+    # -- Export --
+
+    async def save_meeting(
+        self,
+        session_id: Optional[int],
+        meeting: MeetingStats,
+    ) -> int:
+        """Persist a completed meeting's treadmill stats."""
+        assert self._db
+        end_time = datetime.now().isoformat()
+        async with self._db.execute(
+            """INSERT INTO meetings
+                (session_id, meeting_name, start_time, end_time,
+                 distance_m, elapsed_s, calories)
+            VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                session_id,
+                meeting.meeting_name,
+                meeting.start_time.isoformat(),
+                end_time,
+                meeting.distance_m,
+                meeting.elapsed_s,
+                meeting.calories,
+            ),
+        ) as cur:
+            meeting_id = cur.lastrowid
+        await self._db.commit()
+        return meeting_id  # type: ignore[return-value]
 
     # -- Export --
 

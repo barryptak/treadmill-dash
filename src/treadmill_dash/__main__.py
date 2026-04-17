@@ -229,6 +229,9 @@ def main() -> None:
         # Detect treadmill reset (new walk started) while app is still running.
         # Must finalize BEFORE tracking new values or updating the session.
         if session_resolved and _detect_treadmill_reset(data):
+            # Rebase active meeting stats before the session object is replaced
+            if app._meeting is not None:
+                app._meeting.rebase(app.session)
             _finalize_and_start_new_session()
             app.session = SessionStats()
 
@@ -298,6 +301,10 @@ def main() -> None:
     asyncio.run(connection.disconnect())
 
     if repo and db_session_id is not None and app.session.sample_count > 0:
+        # Save any active meeting before closing
+        if app._meeting is not None:
+            app._meeting.update(app.session)
+            asyncio.run(repo.save_meeting(db_session_id, app._meeting))
         asyncio.run(
             repo.end_session(
                 session_id=db_session_id,

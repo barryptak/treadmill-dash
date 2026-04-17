@@ -438,6 +438,7 @@ class TreadmillDashboard(App):
         self.db_session_id: Optional[int] = None
         self._db_stats_dirty = False  # set True when a session is finalized mid-app
         self._meeting: Optional[MeetingStats] = None
+        self._last_meeting: Optional[MeetingStats] = None  # retained after meeting ends
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -527,6 +528,12 @@ class TreadmillDashboard(App):
 
         if status.in_meeting and status.meeting_name:
             if self._meeting is None or self._meeting.meeting_name != status.meeting_name:
+                # Save outgoing meeting if switching between meetings
+                if self._meeting is not None:
+                    self._meeting.update(self.session)
+                    self._save_meeting(self._meeting)
+                    self._last_meeting = self._meeting
+
                 # New meeting started (or switched meetings)
                 session = self.session
                 self._meeting = MeetingStats(
@@ -545,13 +552,29 @@ class TreadmillDashboard(App):
         else:
             if self._meeting is not None:
                 self._meeting.update(self.session)
+                self._save_meeting(self._meeting)
+                use_miles = self.config.use_miles
+                dist = self._meeting.distance_m / (1609.344 if use_miles else 1000)
+                du = self.config.distance_unit
                 self.notify(
                     f"{self._meeting.meeting_name} — "
                     f"{self._meeting.elapsed_fmt}, "
-                    f"{self._meeting.distance_m / 1000:.2f} km",
+                    f"{dist:.2f} {du}",
                     title="📞 Meeting ended",
                 )
+                self._last_meeting = self._meeting
                 self._meeting = None
+
+    def _save_meeting(self, meeting: MeetingStats) -> None:
+        """Persist a completed meeting to the database."""
+        if self.repo is None:
+            return
+        try:
+            asyncio.ensure_future(
+                self.repo.save_meeting(self.db_session_id, meeting)
+            )
+        except Exception:
+            pass  # best-effort; don't crash the UI
 
     def _update_meeting_bar(self) -> None:
         """Refresh the meeting indicator bar."""
@@ -621,15 +644,18 @@ class TreadmillDashboard(App):
             self.notify(f"Clipboard error: {e}", severity="error")
 
     def action_copy_meeting(self) -> None:
-        """Copy current meeting stats as HTML to clipboard."""
-        if self._meeting is None:
-            self.notify("Not in a meeting", severity="warning")
+        """Copy current or last meeting stats as HTML to clipboard."""
+        meeting = self._meeting or self._last_meeting
+        if meeting is None:
+            self.notify("No meeting stats available", severity="warning")
             return
-        self._meeting.update(self.session)
-        html, text = meeting_stats_html(self._meeting, self.config)
+        if self._meeting is not None:
+            meeting.update(self.session)
+        html, text = meeting_stats_html(meeting, self.config)
         try:
             copy_html_to_clipboard(html, text)
-            self.notify(f"Meeting stats copied!", title="📋")
+            label = "Meeting stats copied!" if self._meeting else f"Last meeting ({meeting.meeting_name}) copied!"
+            self.notify(label, title="📋")
         except Exception as e:
             self.notify(f"Clipboard error: {e}", severity="error")
 

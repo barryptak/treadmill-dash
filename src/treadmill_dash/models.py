@@ -64,17 +64,36 @@ class MeetingStats:
     start_calories: int = 0
 
     # Snapshot of treadmill values when meeting started — deltas give
-    # per-meeting stats.
+    # per-meeting stats.  The _banked_* fields accumulate stats from
+    # previous treadmill sessions within the same meeting (when the
+    # treadmill resets mid-meeting).
     distance_m: float = 0.0
     elapsed_s: int = 0
     calories: int = 0
+    _banked_distance_m: float = 0.0
+    _banked_elapsed_s: int = 0
+    _banked_calories: int = 0
 
     def update(self, session: "SessionStats") -> None:
         """Recompute meeting-relative stats from current session values."""
-        self.distance_m = max(0, session.total_distance_m - self.start_distance_m)
+        self.distance_m = self._banked_distance_m + max(0, session.total_distance_m - self.start_distance_m)
         cur_elapsed = session.last_elapsed_s or int(session.duration_s)
-        self.elapsed_s = max(0, cur_elapsed - self.start_elapsed_s)
-        self.calories = max(0, session.total_energy_kcal - self.start_calories)
+        self.elapsed_s = self._banked_elapsed_s + max(0, cur_elapsed - self.start_elapsed_s)
+        self.calories = self._banked_calories + max(0, session.total_energy_kcal - self.start_calories)
+
+    def rebase(self, session: "SessionStats") -> None:
+        """Bank accumulated stats and reset start counters for a new treadmill session.
+
+        Call this just before the session object is replaced after a
+        treadmill reset, so the current deltas are preserved.
+        """
+        self.update(session)
+        self._banked_distance_m = self.distance_m
+        self._banked_elapsed_s = self.elapsed_s
+        self._banked_calories = self.calories
+        self.start_distance_m = 0.0
+        self.start_elapsed_s = 0
+        self.start_calories = 0
 
     @property
     def elapsed_fmt(self) -> str:
