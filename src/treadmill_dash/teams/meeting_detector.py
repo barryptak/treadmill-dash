@@ -97,19 +97,37 @@ _user32.GetWindowThreadProcessId.restype = ctypes.wintypes.DWORD
 _TEAMS_SUFFIX = " | Microsoft Teams"
 _CHAT_PREFIX = "Chat | "
 
-# Patterns that indicate a chat/channel window, not a meeting.
-# Only filter the unambiguous "Chat | …" prefix that the main Teams
-# window adds.  Other patterns (1:1, channel names) can also be
-# legitimate meeting titles, so we rely on the microphone check
-# to confirm we're actually in a call.
-_CHAT_PATTERNS = [
-    re.compile(r"^Chat \| ", re.IGNORECASE),  # "Chat | …" main window prefix
+# Prefixes that indicate a non-meeting Teams window.  These are the
+# well-known navigation sections in the Teams chrome — they should never
+# be treated as meeting titles.
+_NON_MEETING_PREFIXES = [
+    "Chat | ",
+    "Calendar | ",
+    "Activity | ",
+    "Files | ",
+    "Teams | ",
+    "Assignments | ",
+    "Calls | ",
+    "OneDrive | ",
+    "Approvals | ",
+    "Shifts | ",
+    "Planner | ",
+    "Viva | ",
+    "Search | ",
+    "Settings | ",
+    "Notifications | ",
+    "People | ",
+]
+
+_NON_MEETING_PATTERNS = [
+    re.compile(r"^" + re.escape(p), re.IGNORECASE)
+    for p in _NON_MEETING_PREFIXES
 ]
 
 
 def _is_likely_chat(name: str) -> bool:
-    """Return True if the window title is definitely a chat, not a meeting."""
-    return any(p.search(name) for p in _CHAT_PATTERNS)
+    """Return True if the window title is a known non-meeting Teams window."""
+    return any(p.search(name) for p in _NON_MEETING_PATTERNS)
 
 
 def _get_teams_pids() -> set[int]:
@@ -229,12 +247,17 @@ class MeetingStatus:
     meeting_name: Optional[str] = None
 
 
-def get_active_meeting() -> MeetingStatus:
+def get_active_meeting(current_meeting_name: str | None = None) -> MeetingStatus:
     """Detect whether the user is currently in a Teams meeting.
 
     Returns a MeetingStatus with ``in_meeting=True`` and the meeting name
     if Teams has an active microphone session AND a meeting-titled window
     is open.
+
+    If *current_meeting_name* is provided (i.e. we're already tracking a
+    meeting), its window is preferred when multiple Teams windows exist.
+    This prevents focus-switching to a calendar/chat window from
+    interrupting an ongoing meeting.
     """
     if not _is_teams_mic_active():
         return MeetingStatus(in_meeting=False)
@@ -243,5 +266,10 @@ def get_active_meeting() -> MeetingStatus:
     if not titles:
         return MeetingStatus(in_meeting=False)
 
-    # If multiple meeting windows, pick the first (rare edge case)
+    # Sticky: prefer the meeting we're already tracking if its window
+    # is still present.
+    if current_meeting_name and current_meeting_name in titles:
+        return MeetingStatus(in_meeting=True, meeting_name=current_meeting_name)
+
+    # Otherwise pick the first candidate
     return MeetingStatus(in_meeting=True, meeting_name=titles[0])

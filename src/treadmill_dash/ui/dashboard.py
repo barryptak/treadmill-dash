@@ -524,7 +524,8 @@ class TreadmillDashboard(App):
 
     def _poll_meeting(self) -> None:
         """Check for active Teams meeting every ~5 seconds."""
-        status = get_active_meeting()
+        current_name = self._meeting.meeting_name if self._meeting else None
+        status = get_active_meeting(current_meeting_name=current_name)
 
         if status.in_meeting and status.meeting_name:
             if self._meeting is None or self._meeting.meeting_name != status.meeting_name:
