@@ -166,3 +166,44 @@ def parse_speed_range(data: bytes | bytearray) -> Optional[SpeedRange]:
         max_kmh=raw_max / 100.0,
         increment_kmh=raw_inc / 100.0,
     )
+
+
+# ---------------------------------------------------------------------------
+# FTMS Control Point (write commands)
+# ---------------------------------------------------------------------------
+
+FTMS_CONTROL_POINT_UUID = "00002ad9-0000-1000-8000-00805f9b34fb"
+
+# Opcodes
+_OP_REQUEST_CONTROL = 0x00
+_OP_RESET = 0x01
+_OP_SET_TARGET_SPEED = 0x02
+_OP_SET_TARGET_INCLINATION = 0x03
+_OP_START_OR_RESUME = 0x07
+_OP_STOP_OR_PAUSE = 0x08
+
+
+def build_request_control() -> bytes:
+    """Request control of the fitness machine (must be sent before other commands)."""
+    return struct.pack("<B", _OP_REQUEST_CONTROL)
+
+
+def build_set_target_speed(speed_kmh: float) -> bytes:
+    """Set target speed. Speed in km/h, sent as uint16 with 0.01 resolution."""
+    raw = int(round(speed_kmh * 100))
+    return struct.pack("<BH", _OP_SET_TARGET_SPEED, raw)
+
+
+def build_start_or_resume() -> bytes:
+    """Start or resume the treadmill."""
+    return struct.pack("<B", _OP_START_OR_RESUME)
+
+
+def build_stop() -> bytes:
+    """Stop the treadmill (end session)."""
+    return struct.pack("<BB", _OP_STOP_OR_PAUSE, 0x01)
+
+
+def build_pause() -> bytes:
+    """Pause the treadmill."""
+    return struct.pack("<BB", _OP_STOP_OR_PAUSE, 0x02)

@@ -14,8 +14,14 @@ from treadmill_dash.ble.ftms import (
     TREADMILL_DATA_UUID,
     FITNESS_MACHINE_FEATURE_UUID,
     SUPPORTED_SPEED_RANGE_UUID,
+    FTMS_CONTROL_POINT_UUID,
     parse_treadmill_data,
     parse_speed_range,
+    build_request_control,
+    build_set_target_speed,
+    build_start_or_resume,
+    build_stop,
+    build_pause,
     SpeedRange,
 )
 from treadmill_dash.models import TreadmillData
@@ -43,6 +49,7 @@ class TreadmillConnection:
         self._connected = False
         self._running = False
         self._speed_range: Optional[SpeedRange] = None
+        self._has_control = False
 
     @property
     def connected(self) -> bool:
@@ -157,4 +164,86 @@ class TreadmillConnection:
                 pass
             await self._client.disconnect()
         self._connected = False
+        self._has_control = False
         self._status("Disconnected")
+
+    # ------------------------------------------------------------------
+    # FTMS Control Point commands
+    # ------------------------------------------------------------------
+
+    async def _ensure_control(self) -> bool:
+        """Request control of the treadmill if not already held."""
+        if self._has_control:
+            return True
+        if not self.connected or self._client is None:
+            return False
+        try:
+            await self._client.write_gatt_char(
+                FTMS_CONTROL_POINT_UUID, build_request_control(), response=True
+            )
+            self._has_control = True
+            log.info("FTMS control acquired")
+            return True
+        except Exception as e:
+            log.warning(f"Failed to request FTMS control: {e}")
+            return False
+
+    async def set_target_speed(self, speed_kmh: float) -> bool:
+        """Set the treadmill target speed (km/h)."""
+        if not await self._ensure_control():
+            return False
+        # Clamp to supported range
+        if self._speed_range:
+            speed_kmh = max(self._speed_range.min_kmh,
+                           min(speed_kmh, self._speed_range.max_kmh))
+        try:
+            await self._client.write_gatt_char(
+                FTMS_CONTROL_POINT_UUID, build_set_target_speed(speed_kmh), response=True
+            )
+            log.info(f"Set target speed: {speed_kmh:.2f} km/h")
+            return True
+        except Exception as e:
+            log.warning(f"Failed to set speed: {e}")
+            return False
+
+    async def start_or_resume(self) -> bool:
+        """Start or resume the treadmill."""
+        if not await self._ensure_control():
+            return False
+        try:
+            await self._client.write_gatt_char(
+                FTMS_CONTROL_POINT_UUID, build_start_or_resume(), response=True
+            )
+            log.info("Treadmill started/resumed")
+            return True
+        except Exception as e:
+            log.warning(f"Failed to start: {e}")
+            return False
+
+    async def stop_treadmill(self) -> bool:
+        """Stop the treadmill (ends the session)."""
+        if not await self._ensure_control():
+            return False
+        try:
+            await self._client.write_gatt_char(
+                FTMS_CONTROL_POINT_UUID, build_stop(), response=True
+            )
+            log.info("Treadmill stopped")
+            return True
+        except Exception as e:
+            log.warning(f"Failed to stop: {e}")
+            return False
+
+    async def pause_treadmill(self) -> bool:
+        """Pause the treadmill."""
+        if not await self._ensure_control():
+            return False
+        try:
+            await self._client.write_gatt_char(
+                FTMS_CONTROL_POINT_UUID, build_pause(), response=True
+            )
+            log.info("Treadmill paused")
+            return True
+        except Exception as e:
+            log.warning(f"Failed to pause: {e}")
+            return False

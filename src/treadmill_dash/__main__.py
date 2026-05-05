@@ -283,6 +283,7 @@ def main() -> None:
     def run_ble() -> None:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        app.ble_loop = loop
         try:
             loop.run_until_complete(ble_main())
         except Exception as e:
@@ -290,6 +291,10 @@ def main() -> None:
             on_status(f"BLE error: {e}")
         finally:
             loop.close()
+
+    # Expose BLE connection and event loop to the app for control commands
+    app.ble_connection = connection
+    app.ble_loop = None  # set once BLE thread starts its loop
 
     ble_thread = threading.Thread(target=run_ble, daemon=True, name="ble-thread")
     ble_thread.start()

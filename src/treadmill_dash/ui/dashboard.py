@@ -426,6 +426,12 @@ class TreadmillDashboard(App):
         ("t", "copy_today", "📋 Today"),
         ("l", "copy_lifetime", "📋 Lifetime"),
         ("m", "copy_meeting", "📋 Meeting"),
+        ("plus", "speed_up", "Speed +"),
+        ("equals", "speed_up", "Speed +"),
+        ("minus", "speed_down", "Speed -"),
+        ("underscore", "speed_down", "Speed -"),
+        ("space", "pause_resume", "Pause/Resume"),
+        ("x", "stop_treadmill", "Start/Stop"),
     ]
 
     def __init__(self, config: Config | None = None, repo=None, **kwargs) -> None:
@@ -439,6 +445,9 @@ class TreadmillDashboard(App):
         self._db_stats_dirty = False  # set True when a session is finalized mid-app
         self._meeting: Optional[MeetingStats] = None
         self._last_meeting: Optional[MeetingStats] = None  # retained after meeting ends
+        self.ble_connection = None  # set by __main__.py
+        self.ble_loop = None  # set by __main__.py (BLE thread event loop)
+        self._treadmill_paused = False
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -659,6 +668,67 @@ class TreadmillDashboard(App):
             self.notify(label, title="📋")
         except Exception as e:
             self.notify(f"Clipboard error: {e}", severity="error")
+
+    # ------------------------------------------------------------------
+    # Treadmill control actions
+    # ------------------------------------------------------------------
+
+    def _send_ble_command(self, coro_factory) -> None:
+        """Send an async BLE command from the UI thread to the BLE event loop."""
+        if self.ble_connection is None or self.ble_loop is None:
+            self.notify("Not connected to treadmill", severity="warning")
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(coro_factory(), self.ble_loop)
+        except Exception as e:
+            self.notify(f"Command failed: {e}", severity="error")
+
+    def action_speed_up(self) -> None:
+        """Increase treadmill speed by one increment."""
+        conn = self.ble_connection
+        if conn is None or conn.speed_range is None:
+            self.notify("Speed range not available", severity="warning")
+            return
+        current = self._latest_data.instantaneous_speed_kmh or 0.0
+        increment = conn.speed_range.increment_kmh
+        new_speed = current + increment
+        self._send_ble_command(lambda: conn.set_target_speed(new_speed))
+
+    def action_speed_down(self) -> None:
+        """Decrease treadmill speed by one increment."""
+        conn = self.ble_connection
+        if conn is None or conn.speed_range is None:
+            self.notify("Speed range not available", severity="warning")
+            return
+        current = self._latest_data.instantaneous_speed_kmh or 0.0
+        increment = conn.speed_range.increment_kmh
+        new_speed = max(0.0, current - increment)
+        self._send_ble_command(lambda: conn.set_target_speed(new_speed))
+
+    def action_pause_resume(self) -> None:
+        """Toggle pause/resume on the treadmill."""
+        conn = self.ble_connection
+        if conn is None:
+            return
+        if self._treadmill_paused:
+            self._send_ble_command(lambda: conn.start_or_resume())
+            self._treadmill_paused = False
+        else:
+            self._send_ble_command(lambda: conn.pause_treadmill())
+            self._treadmill_paused = True
+
+    def action_stop_treadmill(self) -> None:
+        """Start or stop the treadmill based on current speed."""
+        conn = self.ble_connection
+        if conn is None:
+            return
+        current_speed = self._latest_data.instantaneous_speed_kmh or 0.0
+        if current_speed == 0.0:
+            self._send_ble_command(lambda: conn.start_or_resume())
+            self._treadmill_paused = False
+        else:
+            self._send_ble_command(lambda: conn.stop_treadmill())
+            self._treadmill_paused = False
 
     def on_unmount(self) -> None:
         """Print session summary to terminal after the app exits."""
